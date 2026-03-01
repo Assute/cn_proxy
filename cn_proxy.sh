@@ -92,7 +92,7 @@ cat > "$WORK_DIR/index.html" << 'HTMLEOF'
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>通用加速中继</title>
+    <title>通用加速代理</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -110,6 +110,24 @@ cat > "$WORK_DIR/index.html" << 'HTMLEOF'
             margin-bottom: 8px;
         }
         .subtitle { text-align: center; color: #999; font-size: 14px; margin-bottom: 30px; }
+        .input-box {
+            display: flex; gap: 8px;
+            background: rgba(255,255,255,0.06); border-radius: 12px;
+            padding: 6px; border: 1px solid rgba(255,255,255,0.1);
+        }
+        .input-box input {
+            flex: 1; padding: 12px 16px; font-size: 15px;
+            background: transparent; border: none; outline: none;
+            color: #fff;
+        }
+        .input-box input::placeholder { color: #666; }
+        .input-box button {
+            padding: 12px 24px; font-size: 15px; font-weight: 600;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: #fff; border: none; border-radius: 8px; cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .input-box button:hover { opacity: 0.85; }
         .tips {
             margin-top: 28px; padding: 16px 20px;
             background: rgba(255,255,255,0.04); border-radius: 10px;
@@ -130,14 +148,27 @@ cat > "$WORK_DIR/index.html" << 'HTMLEOF'
 </head>
 <body>
     <div class="container">
-        <h1>通用加速中继</h1>
+        <h1>⚡ 通用加速代理</h1>
         <p class="subtitle">支持任意 HTTPS 链接加速访问</p>
+        <div class="input-box">
+            <input id="url" placeholder="粘贴完整URL，如 https://github.com/..." autofocus />
+            <button onclick="go()">GO</button>
+        </div>
         <div class="tips">
             <p><span class="tag tag-get">下载</span> <code>http://本站/https://github.com/user/repo/archive/master.zip</code></p>
             <p><span class="tag tag-clone">克隆</span> <code>git clone http://本站/https://github.com/user/repo.git</code></p>
             <p><span class="tag tag-get">通用</span> <code>http://本站/https://任意网站/路径/文件</code></p>
         </div>
     </div>
+    <script>
+        function go() {
+            var u = document.getElementById('url').value.trim();
+            if (u) window.location.href = '/' + u;
+        }
+        document.getElementById('url').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') go();
+        });
+    </script>
 </body>
 </html>
 HTMLEOF
@@ -149,8 +180,6 @@ else
     CONF_DIR="/etc/nginx/conf.d"
 fi
 mkdir -p "$CONF_DIR"
-# 清除旧配置（包括上次写错位置的文件）
-rm -f /etc/nginx/conf.d/cn_proxy.conf /etc/nginx/http.d/cn_proxy.conf
 
 # 生成 nginx 配置
 cat > "$CONF_DIR/cn_proxy.conf" << EOF
@@ -163,6 +192,21 @@ server {
 
     location = / {
         try_files /index.html =404;
+    }
+
+    location ~ "^/(.*\.(sh|bash|py|rb|pl|yml|yaml|txt|conf|cfg))\$" {
+        proxy_pass ${C_SERVER}/\$1\$is_args\$args;
+        proxy_ssl_server_name on;
+        proxy_ssl_verify off;
+        proxy_set_header Host ${C_SERVER_HOST};
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header Accept-Encoding "";
+        proxy_read_timeout 300;
+        proxy_buffering off;
+        client_max_body_size 0;
+        sub_filter_once off;
+        sub_filter_types *;
+        sub_filter 'https://' '\$scheme://\$host/https://';
     }
 
     location ~ ^/(.+)\$ {
