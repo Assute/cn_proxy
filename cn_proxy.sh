@@ -40,41 +40,43 @@ else
 fi
 echo ">> 检测到系统: $OS，安装 nginx..."
 
-case "$OS" in
-    alpine)
-        # 释放页面缓存，腾出内存
-        sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-        # 只用 main 仓库，减少 APKINDEX 加载量
-        ALPINE_VER=$(cat /etc/alpine-release | cut -d'.' -f1-2)
-        echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main" > /tmp/apk_repos
-        apk add --no-cache --repositories-file /tmp/apk_repos nginx
-        # 若仍失败，尝试直接下载 .apk 安装（完全跳过索引加载）
-        if ! command -v nginx &>/dev/null; then
-            echo ">> 常规安装失败，尝试直接下载安装..."
-            ARCH=$(uname -m)
-            BASE="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main/${ARCH}"
-            mkdir -p /tmp/ngx_pkgs
-            # 获取 nginx 及依赖的包名
-            for pkg in pcre nginx; do
-                FNAME=$(wget -qO- "${BASE}/" 2>/dev/null | grep -o "\"${pkg}-[0-9][^\"]*\.apk\"" | head -1 | tr -d '"')
-                [ -n "$FNAME" ] && wget -qP /tmp/ngx_pkgs "${BASE}/${FNAME}"
-            done
-            apk add --allow-untrusted /tmp/ngx_pkgs/*.apk 2>/dev/null
-            rm -rf /tmp/ngx_pkgs
-        fi
-        ;;
-
-    debian)
-        apt-get update -qq && apt-get install -y -q nginx
-        ;;
-    rhel)
-        if command -v dnf &>/dev/null; then
-            dnf install -y nginx
-        else
-            yum install -y nginx
-        fi
-        ;;
-esac
+if command -v nginx &>/dev/null; then
+    echo ">> nginx 已安装，跳过"
+else
+    case "$OS" in
+        alpine)
+            # 释放页面缓存，腾出内存
+            sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+            # 只用 main 仓库，减少 APKINDEX 加载量
+            ALPINE_VER=$(cat /etc/alpine-release | cut -d'.' -f1-2)
+            echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main" > /tmp/apk_repos
+            apk add --no-cache --repositories-file /tmp/apk_repos nginx
+            # 若仍失败，尝试直接下载 .apk 安装（完全跳过索引加载）
+            if ! command -v nginx &>/dev/null; then
+                echo ">> 常规安装失败，尝试直接下载安装..."
+                ARCH=$(uname -m)
+                BASE="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main/${ARCH}"
+                mkdir -p /tmp/ngx_pkgs
+                for pkg in pcre nginx; do
+                    FNAME=$(wget -qO- "${BASE}/" 2>/dev/null | grep -o "\"${pkg}-[0-9][^\"]*\.apk\"" | head -1 | tr -d '"')
+                    [ -n "$FNAME" ] && wget -qP /tmp/ngx_pkgs "${BASE}/${FNAME}"
+                done
+                apk add --allow-untrusted /tmp/ngx_pkgs/*.apk 2>/dev/null
+                rm -rf /tmp/ngx_pkgs
+            fi
+            ;;
+        debian)
+            apt-get update -qq && apt-get install -y -q nginx
+            ;;
+        rhel)
+            if command -v dnf &>/dev/null; then
+                dnf install -y nginx
+            else
+                yum install -y nginx
+            fi
+            ;;
+    esac
+fi
 
 if ! command -v nginx &>/dev/null; then
     echo "错误: nginx 安装失败！"
@@ -154,6 +156,7 @@ rm -f /etc/nginx/conf.d/cn_proxy.conf /etc/nginx/http.d/cn_proxy.conf
 cat > "$CONF_DIR/cn_proxy.conf" << EOF
 server {
     listen ${PORT};
+    merge_slashes off;
 
     root ${WORK_DIR};
 
@@ -164,6 +167,7 @@ server {
     location ~ ^/(.+)\$ {
         proxy_pass ${C_SERVER}/\$1\$is_args\$args;
         proxy_ssl_server_name on;
+        proxy_ssl_verify off;
         proxy_set_header Host ${C_SERVER_HOST};
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_read_timeout 300;
@@ -181,9 +185,10 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 启动或重载
+# 启动或重载，并设置开机自启
 if [ "$OS" = "alpine" ]; then
     nginx -s reload 2>/dev/null || nginx
+    rc-update add nginx default 2>/dev/null || true
 else
     systemctl enable nginx 2>/dev/null || true
     systemctl restart nginx
