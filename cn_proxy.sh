@@ -157,6 +157,7 @@ cat > "$CONF_DIR/cn_proxy.conf" << EOF
 server {
     listen ${PORT};
     merge_slashes off;
+    resolver 114.114.114.114 223.5.5.5 valid=300s;
 
     root ${WORK_DIR};
 
