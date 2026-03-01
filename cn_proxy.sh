@@ -140,13 +140,15 @@ cat > "$WORK_DIR/index.html" << 'HTMLEOF'
 </html>
 HTMLEOF
 
-# 检测 nginx 配置目录（Alpine 新版用 http.d，旧版用 conf.d）
-if grep -q 'http.d' /etc/nginx/nginx.conf 2>/dev/null; then
+# 确定 nginx 配置目录（Alpine 用 http.d，其他系统用 conf.d）
+if [ "$OS" = "alpine" ]; then
     CONF_DIR="/etc/nginx/http.d"
 else
     CONF_DIR="/etc/nginx/conf.d"
 fi
 mkdir -p "$CONF_DIR"
+# 清除旧配置（包括上次写错位置的文件）
+rm -f /etc/nginx/conf.d/cn_proxy.conf /etc/nginx/http.d/cn_proxy.conf
 
 # 生成 nginx 配置
 cat > "$CONF_DIR/cn_proxy.conf" << EOF
