@@ -42,8 +42,28 @@ echo ">> 检测到系统: $OS，安装 nginx..."
 
 case "$OS" in
     alpine)
-        apk add --no-cache nginx
+        # 释放页面缓存，腾出内存
+        sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+        # 只用 main 仓库，减少 APKINDEX 加载量
+        ALPINE_VER=$(cat /etc/alpine-release | cut -d'.' -f1-2)
+        echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main" > /tmp/apk_repos
+        apk add --no-cache --repositories-file /tmp/apk_repos nginx
+        # 若仍失败，尝试直接下载 .apk 安装（完全跳过索引加载）
+        if ! command -v nginx &>/dev/null; then
+            echo ">> 常规安装失败，尝试直接下载安装..."
+            ARCH=$(uname -m)
+            BASE="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main/${ARCH}"
+            mkdir -p /tmp/ngx_pkgs
+            # 获取 nginx 及依赖的包名
+            for pkg in pcre nginx; do
+                FNAME=$(wget -qO- "${BASE}/" 2>/dev/null | grep -o "\"${pkg}-[0-9][^\"]*\.apk\"" | head -1 | tr -d '"')
+                [ -n "$FNAME" ] && wget -qP /tmp/ngx_pkgs "${BASE}/${FNAME}"
+            done
+            apk add --allow-untrusted /tmp/ngx_pkgs/*.apk 2>/dev/null
+            rm -rf /tmp/ngx_pkgs
+        fi
         ;;
+
     debian)
         apt-get update -qq && apt-get install -y -q nginx
         ;;
@@ -55,6 +75,13 @@ case "$OS" in
         fi
         ;;
 esac
+
+if ! command -v nginx &>/dev/null; then
+    echo "错误: nginx 安装失败！"
+    echo "提示: 可能是内存不足，尝试先创建 swap："
+    echo "  dd if=/dev/zero of=/swapfile bs=1M count=256 && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+    exit 1
+fi
 
 # 生成首页 HTML
 cat > "$WORK_DIR/index.html" << 'HTMLEOF'
