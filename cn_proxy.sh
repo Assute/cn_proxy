@@ -206,7 +206,7 @@ server {
         client_max_body_size 0;
         sub_filter_once off;
         sub_filter_types *;
-        sub_filter 'https://' '\$scheme://\$host/https://';
+        sub_filter 'https://' '\$scheme://\$http_host/https://';
     }
 
     location ~ ^/(.+)\$ {
