@@ -6,7 +6,7 @@ echo "========================================"
 echo ""
 
 # 输入已部署的 gh-proxy 地址
-read -p "请输入已部署的 gh-proxy 地址 (例如 http://1.2.3.4:80 或 https://ghproxy.example.com): " C_SERVER
+read -p "请输入已部署的 gh-proxy 地址 (例如 http://1.2.3.4:8080 或 https://ghproxy.example.com): " C_SERVER
 C_SERVER="${C_SERVER%/}"
 
 if [ -z "$C_SERVER" ]; then
@@ -18,37 +18,47 @@ fi
 read -p "请输入本服务监听端口 [默认: 9010]: " PORT
 PORT=${PORT:-9010}
 
+# 提取上游 host（用于 SNI 和 Host 头）
+C_SERVER_HOST=$(echo "$C_SERVER" | sed 's|https\?://||' | cut -d'/' -f1)
+
 # 创建工作目录
 WORK_DIR="/opt/cn_proxy"
 mkdir -p "$WORK_DIR"
-cd "$WORK_DIR"
 
-# 生成 requirements.txt
-cat > requirements.txt << 'EOF'
-flask
-requests
-EOF
+# 检测系统并安装 nginx
+echo ""
+echo ">> 检测系统..."
+if [ -f /etc/alpine-release ]; then
+    OS="alpine"
+elif [ -f /etc/debian_version ]; then
+    OS="debian"
+elif [ -f /etc/redhat-release ] || [ -f /etc/centos-release ]; then
+    OS="rhel"
+else
+    echo "错误: 不支持的系统！（仅支持 Alpine / Debian/Ubuntu / CentOS/RHEL）"
+    exit 1
+fi
+echo ">> 检测到系统: $OS，安装 nginx..."
 
-# 生成 relay_proxy.py
-cat > relay_proxy.py << 'PYEOF'
-# -*- coding: utf-8 -*-
-import os
-import requests
-from flask import Flask, Response, request, redirect
-from urllib.parse import quote
+case "$OS" in
+    alpine)
+        apk add --no-cache nginx
+        ;;
+    debian)
+        apt-get update -qq && apt-get install -y -q nginx
+        ;;
+    rhel)
+        if command -v dnf &>/dev/null; then
+            dnf install -y nginx
+        else
+            yum install -y nginx
+        fi
+        ;;
+esac
 
-C_SERVER = os.environ.get('C_SERVER', '').rstrip('/')
-if not C_SERVER:
-    print('错误: 请设置环境变量 C_SERVER')
-    exit(1)
-HOST = '0.0.0.0'
-PORT = int(os.environ.get('PORT', '9010'))
-
-app = Flask(__name__)
-CHUNK_SIZE = 1024 * 10
-NO_PROXY = {'http': None, 'https': None}
-
-INDEX_HTML = '''<!DOCTYPE html>
+# 生成首页 HTML
+cat > "$WORK_DIR/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
 <html lang="zh">
 <head>
     <meta charset="utf-8">
@@ -71,24 +81,6 @@ INDEX_HTML = '''<!DOCTYPE html>
             margin-bottom: 8px;
         }
         .subtitle { text-align: center; color: #999; font-size: 14px; margin-bottom: 30px; }
-        .input-box {
-            display: flex; gap: 8px;
-            background: rgba(255,255,255,0.06); border-radius: 12px;
-            padding: 6px; border: 1px solid rgba(255,255,255,0.1);
-        }
-        .input-box input {
-            flex: 1; padding: 12px 16px; font-size: 15px;
-            background: transparent; border: none; outline: none;
-            color: #fff;
-        }
-        .input-box input::placeholder { color: #666; }
-        .input-box button {
-            padding: 12px 24px; font-size: 15px; font-weight: 600;
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: #fff; border: none; border-radius: 8px; cursor: pointer;
-            transition: opacity 0.2s;
-        }
-        .input-box button:hover { opacity: 0.85; }
         .tips {
             margin-top: 28px; padding: 16px 20px;
             background: rgba(255,255,255,0.04); border-radius: 10px;
@@ -109,14 +101,8 @@ INDEX_HTML = '''<!DOCTYPE html>
 </head>
 <body>
     <div class="container">
-        <h1>⚡ 通用加速中继</h1>
-        <p class="subtitle">支持任意 HTTPS 链接加速访问 · 脚本自动替换</p>
-        <form action="/" method="get">
-            <div class="input-box">
-                <input name="q" placeholder="粘贴完整URL，如 https://github.com/..." autofocus />
-                <button type="submit">GO</button>
-            </div>
-        </form>
+        <h1>通用加速中继</h1>
+        <p class="subtitle">支持任意 HTTPS 链接加速访问</p>
         <div class="tips">
             <p><span class="tag tag-get">下载</span> <code>http://本站/https://github.com/user/repo/archive/master.zip</code></p>
             <p><span class="tag tag-clone">克隆</span> <code>git clone http://本站/https://github.com/user/repo.git</code></p>
@@ -124,131 +110,61 @@ INDEX_HTML = '''<!DOCTYPE html>
         </div>
     </div>
 </body>
-</html>'''
+</html>
+HTMLEOF
 
+# 检测 nginx 配置目录（Alpine 新版用 http.d，旧版用 conf.d）
+if grep -q 'http.d' /etc/nginx/nginx.conf 2>/dev/null; then
+    CONF_DIR="/etc/nginx/http.d"
+else
+    CONF_DIR="/etc/nginx/conf.d"
+fi
+mkdir -p "$CONF_DIR"
 
-@app.route('/')
-def index():
-    if 'q' in request.args:
-        return redirect('/' + request.args.get('q'))
-    return INDEX_HTML
+# 生成 nginx 配置
+cat > "$CONF_DIR/cn_proxy.conf" << EOF
+server {
+    listen ${PORT};
 
+    root ${WORK_DIR};
 
-import re
+    location = / {
+        try_files /index.html =404;
+    }
 
-def replace_urls(content, proxy_base):
-    # 将脚本中所有 https:// 链接替换为代理链接
-    # 避免替换已经是代理链接的URL
-    def replacer(match):
-        url = match.group(0)
-        if proxy_base in url:
-            return url
-        return proxy_base + '/' + url
-    content = re.sub(r'https?://[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}', replacer, content)
-    return content
-
-
-SCRIPT_EXTENSIONS = {'.sh', '.bash', '.py', '.rb', '.pl', '.yml', '.yaml', '.txt', '.md', '.conf', '.cfg'}
-
-
-def is_script_file(url_path):
-    path = url_path.split('?')[0].lower()
-    for ext in SCRIPT_EXTENSIONS:
-        if path.endswith(ext):
-            return True
-    return False
-
-
-@app.route('/<path:u>', methods=['GET', 'POST'])
-def relay(u):
-    target_url = C_SERVER + '/' + u
-    query_string = request.query_string.decode('utf-8')
-    if query_string:
-        target_url += '?' + query_string
-    headers = {k: v for k, v in request.headers if k.lower() not in ('host', 'accept-encoding')}
-    try:
-        r = requests.request(
-            method=request.method,
-            url=target_url,
-            data=request.data,
-            headers=headers,
-            stream=True,
-            allow_redirects=False,
-            timeout=300,
-            proxies=NO_PROXY
-        )
-        resp_headers = dict(r.headers)
-        if 'Location' in resp_headers:
-            location = resp_headers['Location']
-            if location.startswith(C_SERVER):
-                location = location[len(C_SERVER):]
-            if location.startswith('/'):
-                resp_headers['Location'] = location
-            elif location.startswith('http'):
-                resp_headers['Location'] = '/' + location
-        for h in ('Transfer-Encoding', 'Content-Encoding', 'Content-Length'):
-            resp_headers.pop(h, None)
-        if is_script_file(u):
-            content = r.content.decode('utf-8', errors='replace')
-            proxy_base = request.host_url.rstrip('/')
-            modified = replace_urls(content, proxy_base)
-            return Response(modified, headers=resp_headers, status=r.status_code,
-                            content_type='text/plain; charset=utf-8')
-        def generate():
-            for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
-                if chunk:
-                    yield chunk
-        return Response(generate(), headers=resp_headers, status=r.status_code)
-    except requests.exceptions.ConnectionError:
-        return Response(f'无法连接到上游服务器: {C_SERVER}', status=502)
-    except requests.exceptions.Timeout:
-        return Response('连接上游服务器超时', status=504)
-    except Exception as e:
-        return Response(f'代理错误: {str(e)}', status=500)
-
-
-if __name__ == '__main__':
-    print(f'中继代理已启动 | 监听: {HOST}:{PORT} | 上游: {C_SERVER}')
-    app.run(host=HOST, port=PORT)
-PYEOF
-
-cat > Dockerfile << 'EOF'
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
-COPY relay_proxy.py .
-EXPOSE 9010
-CMD ["python", "relay_proxy.py"]
+    location ~ ^/(.+)\$ {
+        proxy_pass ${C_SERVER}/\$1\$is_args\$args;
+        proxy_ssl_server_name on;
+        proxy_set_header Host ${C_SERVER_HOST};
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_read_timeout 300;
+        proxy_buffering off;
+        client_max_body_size 0;
+    }
+}
 EOF
 
-# 停止旧容器
-docker stop cn_proxy 2>/dev/null && docker rm cn_proxy 2>/dev/null
-
-# 构建镜像
-echo ""
-echo ">> 构建 Docker 镜像..."
-docker build -t cn_proxy .
-
+# 检测配置语法
+echo ">> 检查 nginx 配置..."
+nginx -t
 if [ $? -ne 0 ]; then
-    echo "错误: 镜像构建失败！"
+    echo "错误: nginx 配置有误！"
     exit 1
 fi
 
-# 启动容器
-echo ">> 启动容器..."
-docker run -d \
-    --name cn_proxy \
-    -p "0.0.0.0:${PORT}:9010" \
-    -e "C_SERVER=${C_SERVER}" \
-    --restart=always \
-    cn_proxy
+# 启动或重载
+if [ "$OS" = "alpine" ]; then
+    nginx -s reload 2>/dev/null || nginx
+else
+    systemctl enable nginx 2>/dev/null || true
+    systemctl restart nginx
+fi
 
 if [ $? -eq 0 ]; then
     SERVER_IP=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "本机IP")
     echo ""
     echo "========================================"
-    echo "  ✅ 部署成功！"
+    echo "  部署成功！"
     echo "  服务地址: http://${SERVER_IP}:${PORT}"
     echo ""
     echo "  使用方式："
@@ -256,6 +172,6 @@ if [ $? -eq 0 ]; then
     echo "  git clone http://${SERVER_IP}:${PORT}/https://github.com/user/repo.git"
     echo "========================================"
 else
-    echo "错误: 容器启动失败！"
+    echo "错误: nginx 启动失败！"
     exit 1
 fi
