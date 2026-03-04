@@ -1,6 +1,6 @@
 ﻿# CN Proxy 安装脚本说明
 
-`cn_proxy.sh` 是一个一键部署脚本，用于在国内服务器快速搭建中继代理服务，将请求转发到你已部署的上游 `gh-proxy`。
+`cn_proxy.sh` 是一个一键部署脚本，主要用于被屏蔽海外访问的国内服务器做加速：在国内服务器上快速搭建中继代理服务，将请求转发到你已部署的上游 `gh-proxy`。
 
 ## 一键安装
 
@@ -30,3 +30,4 @@ wget "http://你的服务器IP:9010/https://github.com/user/repo/archive/refs/he
 
 - 请先确保上游 `gh-proxy` 可用。
 - 脚本需在 Linux 服务器执行，并具备安装软件权限（通常为 root）。
+
